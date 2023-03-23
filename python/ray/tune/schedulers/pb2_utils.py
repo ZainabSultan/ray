@@ -6,7 +6,9 @@ from GPy.kern import Kern
 from GPy.core import Param
 from sklearn.metrics import pairwise_distances
 from sklearn.metrics.pairwise import euclidean_distances
+import copy
 
+hyperparams = ["lr"]
 
 class TV_SquaredExp(Kern):
     """Time varying squared exponential kernel.
@@ -76,6 +78,78 @@ def normalize(data, wrt):
         np.max(wrt, axis=0) - np.min(wrt, axis=0) + 1e-8
     )
 
+def logarithmic_transform(Xraw, X, indices_to_logtr, bounds_dict):
+    """put the feature on a logarithmic scale
+    Xraw is unnormalised array of time rewards HPs
+    X is normalised array of time rewards HPs
+    indices_to_logtr is a map (0/1) - ones correspond to the indices in X 
+    that we want to apply a log transform to,
+    in other words - 
+    HPs that make sense to logtr - for example lr
+    """
+    X_res = copy.deepcopy(X)
+    keys_names_array =[]
+    for key in bounds_dict.keys():
+        keys_names_array.append(key)
+    num_f = len(indices_to_logtr) - len(keys_names_array)
+    for i in range(len(indices_to_logtr)):
+        if(int(indices_to_logtr[i]) == 1):
+            #then we would want to replace the min max normalisation with the logtr
+            #apply log tr on X
+            
+            max = 1
+            min = 0 + 1e-10 
+            bounds = bounds_dict[keys_names_array[i-num_f]]
+            if(len(indices_to_logtr) > len(X_res)):#to account for if current trial or full data is passed
+                X_res[:,i-num_f] = np.power(10, (((Xraw[:,i-num_f] - bounds[0]) / (bounds[1] - bounds[0])) * (np.log10(max) - np.log10(min))) + np.log10(min))
+
+            else:
+                X_res[:,i] = np.power(10, (((Xraw[:,i] - bounds[0]) / (bounds[1] - bounds[0])) * (np.log10(max) - np.log10(min))) + np.log10(min))
+            #scaling here in the range of 0-1, to ensure mathamatical stabibility of GP we keep scale of all features to be the same.
+            #We add a small offset to 0 to avoid nans   
+            #np.power(10,(((val - lower_linear)/(upper_linear-lower_linear))* (np.log10(upper_log) - np.log10(lower_log))) + np.log10(lower_log))
+            assert(len(X_res.shape)==2)
+
+
+        
+    return X_res
+
+
+def logarithmic_detransform(X, X_denorm, indices_to_logtr, bounds_dict):
+    """
+    reverse what was done by log transform 
+    the process is: replace the wrong denormalisaton by the correct one here
+    the denomalisation that is done assumes a linear scale, but some are on a log scale
+    and we need to account for that
+    X_denorm is de-normalised array of time rewards HPs
+    X is normalised array of time rewards HPs+logtr of some HPs that need that
+    indices_to_logtr is a map (0/1) - ones correspond to the indices in X 
+    that we want to apply a log transform to,
+    in other words - 
+    HPs that make sense to logtr - for example lr
+    """
+    X_res = copy.deepcopy(X_denorm)
+    keys_names_array =[]
+    for key in bounds_dict.keys():
+        keys_names_array.append(key)
+    num_f = len(indices_to_logtr) - len(keys_names_array)
+    
+    for i in range(len(indices_to_logtr)):
+        if(indices_to_logtr[i] == 1):
+            #then we would want to replace the min max normalisation with the logtr
+            #apply log tr on X
+            bounds = bounds_dict[keys_names_array[i-num_f]]
+            max = 1
+            min = 1e-10 #scaling here in the range of 0-1, to ensure mathamatical stabibility of GP we keep scale of all features to be the same.
+            #We add a small offset to 0 to avoid nans   
+            # (upper_linear-lower_linear)*((np.log(y)-np.log(lower_log))/(np.log(upper_log)-np.log(lower_log))) + lower_linear
+
+            if(X[i-num_f]<1e-10):
+                X[i-num_f]=X[i-num_f]+ 1e-10
+
+            X_res[i-num_f] = (bounds[1]-bounds[0])*((np.log10(X[i-num_f]) - np.log10(min))/(np.log10(max) - np.log10(min))) + bounds[0]
+    return X_res
+
 
 def standardize(data):
     """Standardize to be Gaussian N(0,1). Clip final values."""
@@ -126,7 +200,7 @@ def optimize_acq(func, m, m1, fixed, num_f):
     T = 10
     best_value = -999
     best_theta = m1.X[0, :]
-
+    #bounds here are assumed to be in 0,1
     bounds = [(0, 1) for _ in range(m.X.shape[1] - num_f)]
 
     for ii in range(T):

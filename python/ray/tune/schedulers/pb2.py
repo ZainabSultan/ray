@@ -3,7 +3,7 @@ from copy import deepcopy
 import logging
 import numpy as np
 import pandas as pd
-
+import re
 from ray.tune import TuneError
 from ray.tune.schedulers import PopulationBasedTraining
 from ray.tune.experiment import Trial
@@ -31,9 +31,15 @@ if GPy and has_sklearn:
         UCB,
         standardize,
         TV_SquaredExp,
+        logarithmic_transform,
+        logarithmic_detransform
     )
 
 logger = logging.getLogger(__name__)
+
+#def logarithmic_transform(input_array, bounds_dict):
+    #takes an input array of DxN dims - D being numb of params
+
 
 
 def select_config(
@@ -71,6 +77,19 @@ def select_config(
     Xraw = Xraw[-length:, :]
     yraw = yraw[-length:]
 
+    
+    hyperparams_to_logtr = ["lr"]
+    #here we want to find the indices that we should transform to a log scale
+    indices_to_logtr = np.zeros(Xraw.shape[1])
+    i=num_f
+    for key in bounds.keys():
+        
+        if(key in hyperparams_to_logtr):
+            #we want to log transform this
+            indices_to_logtr[i]=1
+
+        i=i+1
+    
     base_vals = np.array(list(bounds.values())).T
     oldpoints = Xraw[:, :num_f]
     old_lims = np.concatenate(
@@ -80,8 +99,16 @@ def select_config(
 
     X = normalize(Xraw, limits)
     y = standardize(yraw).reshape(yraw.size, 1)
+    
+    #here we want to transform the hyperparams
+    #end goal: if not required to be on a log transform, should be normalised to 0-1, else: place on a log scale
+    #so, we pass to the function both X and Xraw - if the HP is to be log_scaled, use XRaw inputs and apply a log scale to it, else use X
+    
+    X = logarithmic_transform(Xraw, X, indices_to_logtr, bounds)
+    
 
     fixed = normalize(newpoint, oldpoints)
+    #fixed = logarithmic_transform(fixed, bounds)
 
     kernel = TV_SquaredExp(
         input_dim=X.shape[1], variance=1.0, lengthscale=1.0, epsilon=0.1
@@ -109,7 +136,9 @@ def select_config(
     else:
         # add the current trials to the dataset
         padding = np.array([fixed for _ in range(current.shape[0])])
+        current_unnorm = deepcopy(current)
         current = normalize(current, base_vals)
+        current = logarithmic_transform(current_unnorm,current,indices_to_logtr, bounds)
         current = np.hstack((padding, current))
 
         Xnew = np.vstack((X, current))
@@ -126,12 +155,14 @@ def select_config(
         m1.optimize()
 
     xt = optimize_acq(UCB, m, m1, fixed, num_f)
+    xt_normalised = deepcopy(xt)
 
     # convert back...
     xt = xt * (np.max(base_vals, axis=0) - np.min(base_vals, axis=0)) + np.min(
         base_vals, axis=0
-    )
+    ) #denormalisation
 
+    xt = logarithmic_detransform(xt_normalised, xt, indices_to_logtr, bounds)
     xt = xt.astype(np.float32)
     return xt
 
@@ -299,7 +330,7 @@ class PB2(PopulationBasedTraining):
         quantile_fraction: float = 0.25,
         log_config: bool = True,
         require_attrs: bool = True,
-        synch: bool = False,
+        synch: bool = False
     ):
 
         gpy_available, sklearn_available = import_pb2_dependencies()
@@ -396,7 +427,7 @@ class PB2(PopulationBasedTraining):
             self.current,
             trial_to_clone,
             trial,
-            trial_to_clone.config,
+            trial_to_clone.config
         )
 
         # Important to replace the old values, since we are copying across
